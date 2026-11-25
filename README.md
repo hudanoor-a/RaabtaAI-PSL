@@ -35,7 +35,7 @@ Run it with `notebooks/pose_extraction.ipynb` on Kaggle (CPU, Internet on, Save 
 | `smooth_landmarks` | true | MediaPipe's temporal filter on the pose |
 | `refine_face_landmarks` | true | more precise lips and eyes; iris points 468-477 dropped to keep 1,662 values |
 | detection / tracking confidence | 0.5 / 0.5 | 0.3 locked onto a poster behind Isharah signer 8 in an earlier trial |
-| hand recovery | MediaPipe Hands (static, 2 hands, complexity 1, confidence 0.5) on frames with a pose and an empty hand slot | Holistic only looks near the pose wrist; recovered hands must pass 4 checks calibrated on Holistic's own hands |
+| hand recovery | MediaPipe Hands (static, 2 hands, complexity 1, confidence 0.3) on frames with a pose and an empty hand slot | Holistic only looks near the pose wrist; recovered hands must pass 4 checks calibrated on Holistic's own hands |
 | enhanced settings (retry) | same, plus frames with a short side under 512 px enlarged ×2 | used only for clips that fail the per-clip checks; the better extraction is kept |
 
 **Not verified here:** the heavy pose model (complexity 2) is downloaded by MediaPipe at first use. The test suite therefore runs with complexity 1 offline; the shipped configuration runs on Kaggle with Internet on.

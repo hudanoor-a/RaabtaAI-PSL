@@ -16,6 +16,7 @@ def test_shipped_configuration_has_the_decided_values():
     assert primary["model_complexity"] == 2 and primary["refine_face_landmarks"] and not primary["static_image_mode"]
     assert primary["min_detection_confidence"] == 0.5 and primary["upscale_short_side_below_pixels"] == 0
     assert enhanced["upscale_short_side_below_pixels"] == 512 and configuration["hand_recovery"]["enabled"]
+    assert configuration["hand_recovery"]["detector"]["min_detection_confidence"] == 0.3
 
 
 def test_misspelled_keys_are_refused(tmp_path):
