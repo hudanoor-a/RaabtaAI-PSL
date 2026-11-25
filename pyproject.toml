@@ -1,0 +1,10 @@
+[project]
+name = "raabta-pose-extraction"
+version = "0.1.0"
+description = "One MediaPipe pose extraction for Isharah, ArSL and PSL, with hand recovery and validation gates."
+requires-python = ">=3.12,<3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-ra --import-mode=importlib"
