@@ -1,0 +1,8 @@
+# Pose-extraction environment: Python 3.12 venv ONLY (mediapipe 0.10.21 has no Python 3.13 build).
+# Kaggle: python -m uv venv --python 3.12 /tmp/pose_env && uv pip install --python /tmp/pose_env/bin/python -r requirements.txt
+mediapipe==0.10.21              # last release with the Solutions API (Holistic, Hands)
+numpy==1.26.4                   # mediapipe 0.10.21 needs numpy < 2
+protobuf==4.25.3                # what mediapipe 0.10.21 was built against
+opencv-contrib-python==4.9.0.80 # mediapipe's own OpenCV; never install opencv-python next to it
+pyyaml>=6.0
+pytest>=8.0

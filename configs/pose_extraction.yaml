@@ -1,0 +1,83 @@
+# Raabta pose extraction: one configuration for Isharah, ArSL and PSL.
+#
+# Every value here is a decision, not a default left in place. Training and inference must use
+# the SAME extraction, so this file is also what live inference must load.
+#
+# Output layout (per clip):  <output_root>/<dataset>/signer<SS>/<clip_id>/<clip_id>.npy
+#   (T, 1662) float32, MediaPipe Holistic layout, unchanged from the original Isharah files:
+#   pose 33 x (x, y, z, visibility) | left hand 21 x 3 | right hand 21 x 3 | face 468 x 3; a part
+#   not detected is all zeros. The file is named <clip_id>.npy (not pose.npy) so the existing
+#   RaabtaAI Isharah reader (which looks for NN_NNNN.npy) reads Isharah output unchanged.
+
+holistic:
+  # Primary settings: the first pass for every clip.
+  primary:
+    static_image_mode: false          # tracking between frames: steadier landmarks, fewer flickers
+    model_complexity: 2               # heavy pose model: best upper-body and wrist accuracy
+    smooth_landmarks: true            # MediaPipe's own temporal filter on pose landmarks
+    refine_face_landmarks: true       # attention mesh: better lips and eyes; the 10 iris points
+                                      # (468-477) are dropped so the layout stays 1662 values
+    min_detection_confidence: 0.5     # 0.3 locked onto a poster behind Isharah signer 8 in the
+    min_tracking_confidence: 0.5      # earlier trial, so the confidence stays at 0.5
+    upscale_short_side_below_pixels: 0   # 0 = no upscaling in the primary pass
+  # Enhanced settings: used only for clips that fail the per-clip checks; the better of the two
+  # extractions is kept (see quality.clip_retry).
+  enhanced:
+    static_image_mode: false
+    model_complexity: 2
+    smooth_landmarks: true
+    refine_face_landmarks: true
+    min_detection_confidence: 0.5
+    min_tracking_confidence: 0.5
+    upscale_short_side_below_pixels: 512  # frames with a short side under 512 px (Isharah: 256)
+                                          # are enlarged x2 (cubic) before detection
+
+hand_recovery:
+  # Holistic looks for each hand only near the pose wrist; MediaPipe Hands searches the whole
+  # frame. It runs only on frames with a pose and an empty hand slot, and a hand it finds is
+  # written only if it passes four checks calibrated on the hands Holistic found in the same run
+  # (wrist near the slot's pose wrist, not a duplicate, plausible size, no jump).
+  enabled: true
+  detector:
+    model_complexity: 1
+    max_num_hands: 2
+    min_detection_confidence: 0.3    # looser than Holistic's 0.5 on purpose: a hand found here is only
+                                     # used if it passes the four calibrated checks, so false
+                                     # detections are filtered there, not by this threshold
+  calibration_clips_per_signer: 40
+  neighbour_window_in_frames: 10
+
+quality:
+  # Per-clip checks; a clip failing any of them is re-extracted with holistic.enhanced.
+  clip_retry:
+    minimum_pose_frame_percent: 90.0
+    minimum_any_hand_frame_percent: 60.0
+    maximum_pose_outlier_frame_percent: 2.0
+  # A frame's pose is an outlier (wrong person, poster, mirror) when its shoulder midpoint is
+  # more than this many clip-median shoulder widths from the clip median, or its shoulder width
+  # is outside this ratio range of the clip median.
+  pose_outlier:
+    maximum_shoulder_midpoint_offset_in_shoulder_widths: 1.0
+    shoulder_width_ratio_range: [0.6, 1.6]
+  # Gates, per signer, set before any result. A signer whose clips were all extracted and whose
+  # gates all pass is written to <output>/<dataset>/; any other signer to
+  # <output>/<dataset>_FAILED_VALIDATION/ with signer_failure.json. No manual step.
+  dataset_gates:
+    minimum_pose_frame_percent: 95.0
+    maximum_pose_outlier_frame_percent: 1.0
+    minimum_any_hand_frame_percent: 80.0          # used when there is no reference extraction
+    minimum_face_frame_percent: 90.0              # skipped for signers whose face is covered
+    face_covered_below_face_frame_percent: 20.0   # below this, the signer is reported as face-covered
+    # Used only with a reference extraction (Isharah original poses):
+    reference_any_hand_must_not_drop: true
+    minimum_overall_any_hand_gain_in_points: 5.0   # whole dataset, reported only (blocks no signer)
+    maximum_median_wrist_offset_from_reference_in_shoulder_widths: 0.10
+
+review:
+  clips_per_signer: 4          # side-by-side images (reference or raw frame | new extraction), for optional spot checks
+  frames_per_clip: 3
+
+runtime:
+  worker_processes: 4
+  clip_timeout_in_seconds: 3600
+  seed: 20261125
