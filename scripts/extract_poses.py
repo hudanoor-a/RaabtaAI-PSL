@@ -6,7 +6,8 @@ Run in the pose-extraction environment (Python 3.12 venv, requirements.txt). Two
              rate and size of a few clips. Nothing is extracted. Run it first and check the names.
   extract    the full run (src/raabta_pose_extraction/extraction_pipeline.py): primary pass, hand
              recovery, per-clip checks, enhanced re-extraction of failing clips, reference
-             comparison, dataset gates, review images, VALIDATION_PASSED / VALIDATION_FAILED.
+             comparison, gates per signer, review images; passing signers in <dataset>/, failing
+             signers in <dataset>_FAILED_VALIDATION/ (exit code 0 only when every signer passed).
 
 Examples:
   python scripts/extract_poses.py discover --dataset-name psl --input-folder /kaggle/input/.../psl-videos
@@ -65,8 +66,10 @@ def run_extract(arguments) -> int:
         worker_processes=arguments.worker_processes)
     printable = {key: summary[key] for key in ("dataset_name", "clips_selected", "clips_written",
                                                "clips_re_extracted_with_enhanced_settings", "clips_kept_from_enhanced_settings",
-                                               "status_counts", "passed", "final_folder")}
-    printable["failed_gates"] = [gate for gate in summary["gates"]["results"] if not gate["passed"]]
+                                               "status_counts", "passed_signers", "failed_signers", "passed_folder",
+                                               "failed_folder")}
+    printable["failed_gates"] = [gate for gate in summary["gates"]["results"] if not gate["passed"] and gate["blocking"]]
+    printable["informational_gates"] = [gate for gate in summary["gates"]["results"] if not gate["blocking"]]
     printable["face_covered_signers"] = summary["gates"]["face_covered_signers"]
     printable["all_signers"] = summary["signers"].get("all")
     print(json.dumps(printable, indent=1))

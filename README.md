@@ -1,8 +1,8 @@
 # RaabtaAI-PSL: pose extraction
 
-One MediaPipe pose extraction for **Isharah, ArSL and PSL**, so the recognition model is trained, fine-tuned and served on the same kind of poses. It writes validated per-clip pose files and keeps a dataset publishable only when every quality gate passes.
+One MediaPipe pose extraction for **Isharah, ArSL and PSL**, so the recognition model is trained, fine-tuned and served on the same kind of poses. It checks quality gates per signer and writes passing signers to a publishable folder automatically, with no manual step.
 
-Run it with `notebooks/pose_extraction.ipynb` on Kaggle (CPU, Internet on), or with `scripts/extract_poses.py`.
+Run it with `notebooks/pose_extraction.ipynb` on Kaggle (CPU, Internet on, Save & Run All), or with `scripts/extract_poses.py`.
 
 ## Output
 
@@ -15,13 +15,16 @@ Run it with `notebooks/pose_extraction.ipynb` on Kaggle (CPU, Internet on), or w
     extraction_summary.json                    configuration, MediaPipe version, calibration, per-signer quality, gates
     clip_reports.jsonl                         one line per clip
     hand_recovery_calibration.json
-    VALIDATION_PASSED.json | VALIDATION_FAILED.json
+    signer_outcomes.json                       passed and failed signers, with the failed gates and clips
+
+<output_root>/<dataset>_FAILED_VALIDATION/     same layout, only for signers that failed
+    signer<SS>/signer_failure.json             the gates it failed and any clip that could not be extracted
 ```
 
 - **Row layout:** pose 33 × (x, y, z, visibility), left hand 21 × 3, right hand 21 × 3, face 468 × 3. A part not detected is all zeros. This is the layout of the original Isharah files, so the RaabtaAI data pipeline reads it unchanged.
 - **Naming:** numbers keep the padding the source uses, at least 2 digits. Isharah becomes `signer00/00_0001`; PSL sentence 7 of signer 3 becomes `signer03/03_07`; a repetition gives `03_07_01`.
 - **Pose file name:** each clip's pose file is named after the clip (`00_0001.npy`), not `pose.npy`. RaabtaAI's Isharah reader finds clips by that name, so Isharah output works there with only a new folder glob.
-- **Failed validation:** when any gate fails, the dataset folder is named `<dataset>_FAILED_VALIDATION`.
+- **Pass or fail per signer:** `<output_root>/<dataset>/` holds only signers whose clips were all extracted and whose gates all pass, so it can be published as it is. A signer missing there failed; its folder and `signer_failure.json` are in `<dataset>_FAILED_VALIDATION/`. The extraction exits with code 0 only when every signer passed.
 
 ## Extraction settings (`configs/pose_extraction.yaml`)
 
@@ -45,7 +48,7 @@ Run it with `notebooks/pose_extraction.ipynb` on Kaggle (CPU, Internet on), or w
 - any hand found in fewer than 60% of frames with a pose;
 - more than 2% pose outlier frames. An outlier frame is one where the shoulder midpoint is more than 1 shoulder width from the clip median, or the shoulder width is outside 0.6-1.6 × the median: a jump to another person or a poster.
 
-**Dataset gates**, per signer, set before any result:
+**Gates**, per signer, set before any result; a signer passes only if all of its gates pass:
 
 | Gate | Pass if |
 | --- | --- |
@@ -53,9 +56,10 @@ Run it with `notebooks/pose_extraction.ipynb` on Kaggle (CPU, Internet on), or w
 | pose outlier frames | ≤ 1% |
 | face frames | ≥ 90%; skipped (and reported) for signers whose face is found in fewer than 20% of frames, for example niqabi signers |
 | any-hand frames, without a reference | ≥ 80% |
-| with a reference extraction (Isharah originals) | pose and any-hand coverage not below the reference for any signer; overall any-hand gain ≥ 5 points; median wrist offset from the reference ≤ 0.10 shoulder widths |
-| all clips written | every selected clip extracted without error |
-| human review (notebook step 6) | ≥ 95% of the side-by-side images correct |
+| with a reference extraction (Isharah originals) | pose and any-hand coverage not below the reference; median wrist offset from the reference ≤ 0.10 shoulder widths. The overall any-hand gain (target ≥ 5 points) is reported for the whole dataset but blocks no signer |
+| all clips written | every clip of the signer extracted without error |
+
+The side-by-side images `pose<FFFF>.jpg` are kept in a sample of clip folders for optional spot checks; nothing waits for a person.
 
 ## Runtime
 

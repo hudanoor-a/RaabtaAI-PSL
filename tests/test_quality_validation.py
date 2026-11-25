@@ -59,6 +59,7 @@ def test_gates_with_and_without_reference():
     summary = aggregate_by_signer([{"signer_folder_name": "signer00", "quality": measure_clip_quality(worse, None, OUTLIER_SETTINGS)}])
     gates = evaluate_dataset_gates(summary, GATES, has_reference=False)
     assert not gates["passed"] and [g["gate"] for g in gates["results"] if not g["passed"]] == ["any_hand_frame_percent"]
+    assert gates["signer_passed"] == {"signer00": False}
 
 
 def test_a_face_covered_signer_is_reported_not_failed():
@@ -66,3 +67,11 @@ def test_a_face_covered_signer_is_reported_not_failed():
     summary = aggregate_by_signer([{"signer_folder_name": "signer06", "quality": measure_clip_quality(clip, None, OUTLIER_SETTINGS)}])
     gates = evaluate_dataset_gates(summary, GATES, has_reference=False)
     assert gates["face_covered_signers"] == ["signer06"] and gates["passed"]
+
+
+def test_one_failing_signer_does_not_fail_the_others():
+    good, bad = with_face(make_clip(40)), with_face(make_clip(40, left_missing=set(range(30)), right_missing=set(range(30))))
+    summary = aggregate_by_signer([{"signer_folder_name": "signer00", "quality": measure_clip_quality(good, None, OUTLIER_SETTINGS)},
+                                   {"signer_folder_name": "signer01", "quality": measure_clip_quality(bad, None, OUTLIER_SETTINGS)}])
+    gates = evaluate_dataset_gates(summary, GATES, has_reference=False)
+    assert gates["signer_passed"] == {"signer00": True, "signer01": False} and not gates["passed"]

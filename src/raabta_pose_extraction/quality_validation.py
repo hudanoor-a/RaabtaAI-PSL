@@ -173,16 +173,21 @@ def aggregate_by_signer(clip_reports: list[dict]) -> dict:
 
 
 def evaluate_dataset_gates(signer_summary: dict, gates: dict, has_reference: bool) -> dict:
-    """Every gate per signer; `passed` only when all pass. Thresholds come from the config, fixed before results."""
+    """Every gate per signer; a signer passes only when all of ITS gates pass (thresholds fixed in the config).
+
+    The overall any-hand gain over the reference is reported for the whole dataset but blocks no signer
+    (a signer already near 95% cannot gain 5 points); per signer, coverage must not drop below the reference.
+    """
     results = []
 
-    def record(gate: str, group: str, value, threshold, passed: bool):
-        results.append({"gate": gate, "group": group, "value": value, "threshold": threshold, "passed": bool(passed)})
+    def record(gate: str, group: str, value, threshold, passed: bool, blocking: bool = True):
+        results.append({"gate": gate, "group": group, "value": value, "threshold": threshold, "passed": bool(passed),
+                        "blocking": blocking})
 
     face_covered = []
-    for group, entry in sorted(signer_summary.items()):
-        if group == "all":
-            continue
+    signers = sorted(group for group in signer_summary if group != "all")
+    for group in signers:
+        entry = signer_summary[group]
         record("pose_frame_percent", group, entry["pose_frame_percent"], f">= {gates['minimum_pose_frame_percent']}",
                entry["pose_frame_percent"] >= gates["minimum_pose_frame_percent"])
         record("pose_outlier_frame_percent", group, entry["pose_outlier_frame_percent"],
@@ -201,6 +206,10 @@ def evaluate_dataset_gates(signer_summary: dict, gates: dict, has_reference: boo
             record("pose_not_below_reference", group, entry["pose_frame_percent"],
                    f">= reference {entry['reference_pose_frame_percent']}",
                    entry["pose_frame_percent"] >= entry["reference_pose_frame_percent"])
+            offset = entry.get("median_wrist_offset_from_reference_in_shoulder_widths")
+            if offset is not None:
+                limit = gates["maximum_median_wrist_offset_from_reference_in_shoulder_widths"]
+                record("median_wrist_offset_from_reference", group, offset, f"<= {limit}", offset <= limit)
         else:
             record("any_hand_frame_percent", group, entry["any_hand_frame_percent"], f">= {gates['minimum_any_hand_frame_percent']}",
                    entry["any_hand_frame_percent"] >= gates["minimum_any_hand_frame_percent"])
@@ -208,10 +217,7 @@ def evaluate_dataset_gates(signer_summary: dict, gates: dict, has_reference: boo
     if has_reference and "reference_any_hand_frame_percent" in overall:
         gain = round(overall["any_hand_frame_percent"] - overall["reference_any_hand_frame_percent"], 2)
         record("overall_any_hand_gain_points", "all", gain, f">= {gates['minimum_overall_any_hand_gain_in_points']}",
-               gain >= gates["minimum_overall_any_hand_gain_in_points"])
-        offset = overall.get("median_wrist_offset_from_reference_in_shoulder_widths")
-        if offset is not None:
-            limit = gates["maximum_median_wrist_offset_from_reference_in_shoulder_widths"]
-            record("median_wrist_offset_from_reference", "all", offset, f"<= {limit}", offset <= limit)
-    return {"passed": all(result["passed"] for result in results) and bool(results), "results": results,
+               gain >= gates["minimum_overall_any_hand_gain_in_points"], blocking=False)
+    signer_passed = {group: all(result["passed"] for result in results if result["group"] == group) for group in signers}
+    return {"passed": bool(signers) and all(signer_passed.values()), "signer_passed": signer_passed, "results": results,
             "face_covered_signers": face_covered}

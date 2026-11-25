@@ -11,10 +11,10 @@ Steps (each clip is read from disk once per settings):
   4. recover missed hands and measure every clip; clips failing the per-clip checks are
      re-extracted with the ENHANCED settings and the better extraction is kept;
   5. compare with a reference extraction when one is given (Isharah original poses);
-  6. write the dataset, per-signer summary and gate results. If every gate passes, the dataset
-     folder is <output>/<dataset> with VALIDATION_PASSED.json; otherwise it is
-     <output>/<dataset>_FAILED_VALIDATION with VALIDATION_FAILED.json, and must not be published.
-     A human review of the side-by-side images is still required before publishing.
+  6. decide per signer and write: a signer whose clips were all written and whose gates all pass
+     goes to <output>/<dataset>/signer<SS>; any other signer goes to
+     <output>/<dataset>_FAILED_VALIDATION/signer<SS> with signer_failure.json. <output>/<dataset> is
+     therefore publishable as is, with no manual step: a missing signer there is a failed signer.
 """
 
 from __future__ import annotations
@@ -326,8 +326,9 @@ def run_dataset_extraction(dataset_name: str, input_folder: Path, output_root: P
     written = [report for report in reports if report["status"] == "written"]
     signer_summary = aggregate_by_signer(written)
     gates = evaluate_dataset_gates(signer_summary, configuration["quality"]["dataset_gates"], bool(reference_index))
-    all_clips_written = len(written) == len(clips)
-    passed = gates["passed"] and all_clips_written
+    signer_outcomes = decide_signer_outcomes(clips, reports, gates)
+    passed_signers = sorted(signer for signer, outcome in signer_outcomes.items() if outcome["passed"])
+    failed_signers = sorted(signer for signer, outcome in signer_outcomes.items() if not outcome["passed"])
     from raabta_pose_extraction.mediapipe_models import describe_mediapipe_version
     summary = {
         "dataset_name": dataset_name, "input_folder": str(input_folder), "clip_name_pattern": pattern,
@@ -335,32 +336,59 @@ def run_dataset_extraction(dataset_name: str, input_folder: Path, output_root: P
         "clips_re_extracted_with_enhanced_settings": len(retry_clips),
         "clips_kept_from_enhanced_settings": sum(1 for report in written if report["settings_used"] == "enhanced"),
         "status_counts": {status: sum(report["status"] == status for report in reports) for status in sorted({r["status"] for r in reports})},
-        "signers": signer_summary, "gates": gates, "all_clips_written": all_clips_written, "passed": passed,
-        "human_review_required": True, "configuration": configuration,
+        "passed_signers": passed_signers, "failed_signers": failed_signers, "signer_outcomes": signer_outcomes,
+        "passed": not failed_signers, "signers": signer_summary, "gates": gates, "configuration": configuration,
         "hand_recovery_calibration": recovery.to_dictionary() if recovery else None,
         "hand_recovery_applied": recovery is not None,
         "mediapipe_version": describe_mediapipe_version(), "reference_clips_found": sum(1 for r in written if "reference_comparison" in r),
     }
-    final_name = dataset_name if passed else f"{dataset_name}_FAILED_VALIDATION"
-    final_folder = output_root / final_name
-    if final_folder.exists():
-        shutil.rmtree(final_folder)
-    (staging / dataset_name).mkdir(parents=True, exist_ok=True)
-    (staging / dataset_name).rename(final_folder)
+    # Passing signers go to <dataset>/, failing signers to <dataset>_FAILED_VALIDATION/: the publishable
+    # folder holds only signers that passed every gate, so a missing signer folder means that signer failed.
+    passed_folder, failed_folder = output_root / dataset_name, output_root / f"{dataset_name}_FAILED_VALIDATION"
+    for folder in (passed_folder, failed_folder):
+        if folder.exists():
+            shutil.rmtree(folder)
+    for signer, outcome in signer_outcomes.items():
+        source = staging / dataset_name / signer
+        target = (passed_folder if outcome["passed"] else failed_folder) / signer
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.exists():
+            source.rename(target)
+        else:
+            target.mkdir(parents=True)
+        if not outcome["passed"]:
+            (target / "signer_failure.json").write_text(json.dumps(outcome, indent=1), encoding="utf-8")
     shutil.rmtree(staging)
-    (final_folder / "extraction_summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
-    with (final_folder / "clip_reports.jsonl").open("w", encoding="utf-8") as handle:
-        for report in reports:
-            handle.write(json.dumps(report) + "\n")
-    if recovery is not None:
-        (final_folder / "hand_recovery_calibration.json").write_text(json.dumps(recovery.to_dictionary(), indent=1), encoding="utf-8")
-    marker = "VALIDATION_PASSED.json" if passed else "VALIDATION_FAILED.json"
-    (final_folder / marker).write_text(json.dumps({"passed": passed, "failed_gates": [g for g in gates["results"] if not g["passed"]],
-                                                   "all_clips_written": all_clips_written, "human_review_required": True}, indent=1),
-                                       encoding="utf-8")
-    summary["final_folder"] = str(final_folder)
-    LOGGER.info("Dataset %s: %s -> %s", dataset_name, "PASSED" if passed else "FAILED", final_folder)
+    for folder in (passed_folder, failed_folder):
+        if not folder.exists():
+            continue
+        (folder / "extraction_summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+        (folder / "signer_outcomes.json").write_text(json.dumps({"passed_signers": passed_signers, "failed_signers": failed_signers,
+                                                                 "signer_outcomes": signer_outcomes}, indent=1), encoding="utf-8")
+        with (folder / "clip_reports.jsonl").open("w", encoding="utf-8") as handle:
+            for report in reports:
+                handle.write(json.dumps(report) + "\n")
+        if recovery is not None:
+            (folder / "hand_recovery_calibration.json").write_text(json.dumps(recovery.to_dictionary(), indent=1), encoding="utf-8")
+    summary["passed_folder"] = str(passed_folder) if passed_folder.exists() else None
+    summary["failed_folder"] = str(failed_folder) if failed_folder.exists() else None
+    LOGGER.info("Dataset %s: %d signers passed %s, %d failed %s.", dataset_name, len(passed_signers), passed_signers,
+                len(failed_signers), failed_signers)
     return summary
+
+
+def decide_signer_outcomes(clips: list[NamedClip], reports: list[dict], gates: dict) -> dict:
+    """Per signer: passed only if every one of its clips was written and every one of its gates passed."""
+    outcomes = {}
+    for signer in sorted({clip.signer_folder_name for clip in clips}):
+        signer_reports = [report for report in reports if report["signer_folder_name"] == signer]
+        unwritten = [{"clip_identifier": report["clip_identifier"], "status": report["status"], "error": report.get("error"),
+                      "integrity_problems": report.get("integrity_problems")}
+                     for report in signer_reports if report["status"] != "written"]
+        failed_gates = [result for result in gates["results"] if result["group"] == signer and not result["passed"]]
+        outcomes[signer] = {"passed": gates["signer_passed"].get(signer, False) and not unwritten,
+                            "clips": len(signer_reports), "clips_not_written": unwritten, "failed_gates": failed_gates}
+    return outcomes
 
 
 def write_review_images(clip: NamedClip, outcome: dict, reference_rows: np.ndarray | None, work_folder: Path,

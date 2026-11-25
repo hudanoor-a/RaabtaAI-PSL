@@ -57,8 +57,9 @@ quality:
   pose_outlier:
     maximum_shoulder_midpoint_offset_in_shoulder_widths: 1.0
     shoulder_width_ratio_range: [0.6, 1.6]
-  # Dataset gates, per signer, set before any result. The output is publishable only if every
-  # gate passes AND the human review of the overlays is confirmed in the notebook.
+  # Gates, per signer, set before any result. A signer whose clips were all extracted and whose
+  # gates all pass is written to <output>/<dataset>/; any other signer to
+  # <output>/<dataset>_FAILED_VALIDATION/ with signer_failure.json. No manual step.
   dataset_gates:
     minimum_pose_frame_percent: 95.0
     maximum_pose_outlier_frame_percent: 1.0
@@ -67,11 +68,11 @@ quality:
     face_covered_below_face_frame_percent: 20.0   # below this, the signer is reported as face-covered
     # Used only with a reference extraction (Isharah original poses):
     reference_any_hand_must_not_drop: true
-    minimum_overall_any_hand_gain_in_points: 5.0
+    minimum_overall_any_hand_gain_in_points: 5.0   # whole dataset, reported only (blocks no signer)
     maximum_median_wrist_offset_from_reference_in_shoulder_widths: 0.10
 
 review:
-  clips_per_signer: 4          # side-by-side overlays (reference or raw frame | new extraction)
+  clips_per_signer: 4          # side-by-side images (reference or raw frame | new extraction), for optional spot checks
   frames_per_clip: 3
 
 runtime:

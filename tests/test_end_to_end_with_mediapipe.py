@@ -47,8 +47,11 @@ def test_videos_are_extracted_validated_and_written_in_the_agreed_layout(tmp_pat
         for sentence in (1, 2):
             write_video(tmp_path / "psl" / f"Signer{signer}" / f"sentence{sentence}.mp4", image, 12)
     summary = run_dataset_extraction("psl", tmp_path / "psl", tmp_path / "out", tmp_path / "work", offline_configuration)
-    final = Path(summary["final_folder"])
-    assert summary["clips_written"] == 4 and final.name in ("psl", "psl_FAILED_VALIDATION")
+    # The photo shows no hands, so every signer fails the any-hand gate and goes to the failed folder.
+    assert summary["clips_written"] == 4 and summary["failed_signers"] == ["signer01", "signer02"] and summary["passed_folder"] is None
+    final = Path(summary["failed_folder"])
+    failure = json.loads((final / "signer01" / "signer_failure.json").read_text())
+    assert [gate["gate"] for gate in failure["failed_gates"]] == ["any_hand_frame_percent"] and failure["clips_not_written"] == []
     clip_folder = final / "signer01" / "01_01"
     rows = np.load(clip_folder / "01_01.npy")
     assert rows.shape == (12, 1662) and rows.dtype == np.float32
@@ -58,8 +61,8 @@ def test_videos_are_extracted_validated_and_written_in_the_agreed_layout(tmp_pat
     assert np.load(clip_folder / "hand_source.npy").shape == (12, 2)
     reviews = sorted(final.glob("signer*/*/pose*.jpg"))
     assert len(reviews) == 4 and all(len(path.stem) == len("pose0000") for path in reviews)
-    assert (final / ("VALIDATION_PASSED.json" if summary["passed"] else "VALIDATION_FAILED.json")).exists()
     assert (final / "extraction_summary.json").exists() and (final / "clip_reports.jsonl").exists()
+    assert json.loads((final / "signer_outcomes.json").read_text())["failed_signers"] == ["signer01", "signer02"]
 
 
 def test_frame_folders_with_a_reference_extraction(tmp_path, offline_configuration):
@@ -70,10 +73,10 @@ def test_frame_folders_with_a_reference_extraction(tmp_path, offline_configurati
         for frame in range(10):
             cv2.imwrite(str(folder / f"{frame}.jpg"), np.roll(image, frame, axis=1))
     first = run_dataset_extraction("isharah", tmp_path / "isharah", tmp_path / "out_first", tmp_path / "work_first", offline_configuration)
-    reference_folder = Path(first["final_folder"])
+    reference_folder = Path(first["passed_folder"] or first["failed_folder"])
     second = run_dataset_extraction("isharah", tmp_path / "isharah", tmp_path / "out_second", tmp_path / "work_second",
                                     offline_configuration, reference_pose_folders=[reference_folder])
     assert second["reference_clips_found"] == 2
-    report = json.loads((Path(second["final_folder"]) / "signer00" / "00_0001" / "extraction_report.json").read_text())
+    report = json.loads((Path(second["passed_folder"] or second["failed_folder"]) / "signer00" / "00_0001" / "extraction_report.json").read_text())
     assert report["reference_comparison"]["frame_count_matches_reference"]
     assert report["reference_comparison"]["median_wrist_offset_from_reference_in_shoulder_widths"] < 0.05
