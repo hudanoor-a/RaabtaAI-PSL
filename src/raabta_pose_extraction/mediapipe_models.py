@@ -15,11 +15,17 @@ directly comparable with an extraction made without upscaling. 0 switches it off
 
 A NEW Holistic object is created for every clip so tracking state never leaks between clips.
 The two sys.modules lines are a known packaging workaround (mediapipe/__init__ imports the Tasks
-API, which fails on Kaggle images); they must run before `import mediapipe`.
+API, which fails on Kaggle images); they must run before `import mediapipe`. MPLBACKEND is forced
+to Agg for the same reason: `import mediapipe` imports matplotlib, and a Kaggle notebook passes its
+own inline backend (MPLBACKEND=module://matplotlib_inline...) to child processes, which the venv's
+matplotlib refuses. This code never draws with matplotlib.
 """
 
+import os
 import sys
 import types
+
+os.environ["MPLBACKEND"] = "Agg"
 
 sys.modules['mediapipe.tasks'] = types.ModuleType('mediapipe.tasks')
 sys.modules['mediapipe.tasks.python'] = types.ModuleType('mediapipe.tasks.python')
