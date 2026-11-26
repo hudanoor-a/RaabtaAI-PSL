@@ -55,6 +55,14 @@ def run_discover(arguments) -> int:
         if missing:
             print(f"ERROR: selected signers {missing} have no clips in the input folders.")
             return 1
+    if arguments.summary_file:   # read by src/raabta_pose_extraction/kaggle_chain.py
+        by_signer: dict = {}
+        for clip in named:
+            entry = by_signer.setdefault(clip.signer_folder_name, {"signer_number": clip.signer_number, "clips": []})
+            entry["clips"].append({"clip_identifier": clip.clip_identifier, "source_path": str(clip.source_path),
+                                   "source_kind": clip.source_kind})
+        Path(arguments.summary_file).write_text(json.dumps({"clip_name_pattern": pattern, "folder_signer_conflicts": conflicts,
+                                                            "signers": by_signer}, indent=1), encoding="utf-8")
     print("frame rate and size of the first clip of each signer:")
     seen = set()
     for clip in named:
@@ -111,6 +119,7 @@ def parse_arguments(arguments=None) -> argparse.Namespace:
                         help="Folder(s) with an earlier extraction, files named <clip_identifier>.npy (Isharah originals).")
     parser.add_argument("--calibration-file", help="Reuse the hand-recovery calibration of an earlier session of this dataset.")
     parser.add_argument("--worker-processes", type=int)
+    parser.add_argument("--summary-file", help="discover: also write the clips per signer to this JSON file.")
     return parser.parse_args(arguments)
 
 
