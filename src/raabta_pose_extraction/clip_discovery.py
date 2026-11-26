@@ -3,6 +3,11 @@
 A clip is either a VIDEO file (.mp4, .mov, .avi, .mkv, .webm, .m4v) or a FRAME FOLDER (a folder
 that directly holds image files). Which kind a dataset uses is detected; mixing both is an error.
 
+A dataset may be split over several input folders (Isharah on Kaggle: one dataset per signer,
+for example /kaggle/input/datasets/<owner>/signer02-isharah1000). Every clip's name therefore
+starts with the name of the input folder it was found in ("signer02-isharah1000/0001"), so the
+signer number can come from either the folder name or the path inside it.
+
 Naming. The signer and sentence numbers are read from each clip's path relative to the dataset
 folder, with one regular expression that has the named groups `signer` and `sentence` (and,
 optionally, `repetition`). Nothing is guessed silently: unless a pattern is given, the candidate
@@ -35,7 +40,10 @@ CANDIDATE_CLIP_NAME_PATTERNS = (
     r"(?i)(?:^|/)signer[ _-]?(?P<signer>\d+)/(?:.*/)?(?:sentence[ _-]?)?(?P<sentence>\d+)$",
     # .../00/0001/2 (signer, sentence, repetition)
     r"(?:^|/)(?P<signer>\d+)/(?P<sentence>\d+)/(?P<repetition>\d+)$",
+    # signer02-isharah1000/.../0001 (signer number inside a longer folder name, e.g. a Kaggle dataset)
+    r"(?i)(?:^|/)signer[ _-]?(?P<signer>\d+)[^/]*/(?:.*/)?(?:sentence[ _-]?)?(?P<sentence>\d+)$",
 )
+FOLDER_SIGNER_PATTERN = re.compile(r"(?i)signer[ _-]?(\d+)")
 
 
 class ClipDiscoveryError(RuntimeError):
@@ -46,7 +54,7 @@ class ClipDiscoveryError(RuntimeError):
 class DiscoveredClip:
     source_path: Path          # video file or frame folder
     source_kind: str           # "video" | "frame_folder"
-    relative_name: str         # path relative to the dataset folder, without extension, "/" separated
+    relative_name: str         # <input folder name>/<path inside it>, without extension, "/" separated
 
 
 @dataclass(frozen=True)
@@ -69,11 +77,24 @@ def is_video_file(name: str) -> bool:
     return name.lower().endswith(VIDEO_FILE_EXTENSIONS)
 
 
+def scan_dataset_folders(dataset_folders: list[Path]) -> list[DiscoveredClip]:
+    """All clips of one dataset spread over one or more input folders (names prefixed by the folder name)."""
+    if not dataset_folders:
+        raise ClipDiscoveryError("No input folder given.")
+    names = [Path(folder).name for folder in dataset_folders]
+    if len(set(names)) != len(names):
+        raise ClipDiscoveryError(f"Two input folders have the same name: {sorted(names)}.")
+    clips = [clip for folder in dataset_folders for clip in scan_dataset_folder(Path(folder))]
+    if len({clip.source_kind for clip in clips}) > 1:
+        raise ClipDiscoveryError("The input folders mix videos and frame folders; one dataset must use one kind.")
+    return sorted(clips, key=lambda clip: clip.relative_name)
+
+
 def scan_dataset_folder(dataset_folder: Path) -> list[DiscoveredClip]:
-    """Video files and frame folders under dataset_folder. Frame folders are not descended into."""
+    """Video files and frame folders under one input folder. Frame folders are not descended into."""
     dataset_folder = Path(dataset_folder)
     if not dataset_folder.is_dir():
-        raise ClipDiscoveryError(f"{dataset_folder} is not a folder.")
+        raise ClipDiscoveryError(f"{dataset_folder} is not a folder (check the input folder setting).")
     clips: list[DiscoveredClip] = []
     pending = [dataset_folder]
     while pending:
@@ -84,14 +105,14 @@ def scan_dataset_folder(dataset_folder: Path) -> list[DiscoveredClip]:
                 if entry.is_dir(follow_symlinks=True):
                     subfolders.append(Path(entry.path))
                 elif is_video_file(entry.name):
-                    relative = Path(entry.path).relative_to(dataset_folder).with_suffix("").as_posix()
+                    relative = (Path(dataset_folder.name) / Path(entry.path).relative_to(dataset_folder).with_suffix("")).as_posix()
                     clips.append(DiscoveredClip(Path(entry.path), "video", relative))
                 elif is_image_file(entry.name):
                     image_count += 1
                     if image_count >= MINIMUM_IMAGES_FOR_FRAME_FOLDER and not subfolders:
                         break   # a frame folder: stop listing its (possibly hundreds of) frames
         if image_count >= MINIMUM_IMAGES_FOR_FRAME_FOLDER:
-            clips.append(DiscoveredClip(folder, "frame_folder", folder.relative_to(dataset_folder).as_posix()))
+            clips.append(DiscoveredClip(folder, "frame_folder", (Path(dataset_folder.name) / folder.relative_to(dataset_folder)).as_posix()))
             continue
         pending.extend(subfolders)
     kinds = {clip.source_kind for clip in clips}
@@ -116,13 +137,30 @@ def try_clip_name_pattern(clips: list[DiscoveredClip], pattern: str) -> tuple[li
     return (parsed if not unmatched else None), unmatched
 
 
-def compute_number_width(tokens: list[str]) -> int:
-    """max(2, longest token as written, digits of the largest value)."""
-    return max([2] + [len(token) for token in tokens] + [len(str(max(int(token) for token in tokens)))])
+def compute_number_width(tokens: list[str], minimum_width: int = 2) -> int:
+    """max(minimum_width, longest token as written, digits of the largest value)."""
+    return max([minimum_width] + [len(token) for token in tokens] + [len(str(max(int(token) for token in tokens)))])
 
 
-def name_clips(clips: list[DiscoveredClip], clip_name_pattern: str | None = None) -> tuple[list[NamedClip], str]:
-    """Signer and clip identifier for every clip, plus the pattern used. Raises when ambiguous."""
+def find_folder_signer_conflicts(named: list["NamedClip"]) -> list[str]:
+    """Input folders whose name says 'signer<N>' while the clip names inside parse to another signer."""
+    conflicts = set()
+    for clip in named:
+        folder_name = clip.relative_name.split("/", 1)[0]
+        match = FOLDER_SIGNER_PATTERN.search(folder_name)
+        if match and int(match.group(1)) != clip.signer_number:
+            conflicts.add(f"{folder_name}: folder name says signer {int(match.group(1))}, clip names say signer {clip.signer_number}")
+    return sorted(conflicts)
+
+
+def name_clips(clips: list[DiscoveredClip], clip_name_pattern: str | None = None,
+               minimum_widths: dict | None = None) -> tuple[list[NamedClip], str]:
+    """Signer and clip identifier for every clip, plus the pattern used. Raises when ambiguous.
+
+    minimum_widths {"signer": 2, "sentence": 4} fixes the padding a dataset is known to use (Isharah:
+    NN_NNNN), so a run over only some signers names clips exactly like a run over all of them.
+    """
+    minimum_widths = minimum_widths or {}
     patterns = [clip_name_pattern] if clip_name_pattern else list(CANDIDATE_CLIP_NAME_PATTERNS)
     reports = []
     for pattern in patterns:
@@ -130,13 +168,13 @@ def name_clips(clips: list[DiscoveredClip], clip_name_pattern: str | None = None
         if parsed is None:
             reports.append(f"  {pattern}: {len(unmatched)} of {len(clips)} paths do not match, e.g. {unmatched[:3]}")
             continue
-        signer_width = compute_number_width([values["signer"] for values in parsed])
-        sentence_width = compute_number_width([values["sentence"] for values in parsed])
+        signer_width = compute_number_width([values["signer"] for values in parsed], minimum_widths.get("signer", 2))
+        sentence_width = compute_number_width([values["sentence"] for values in parsed], minimum_widths.get("sentence", 2))
         repetitions = [values["repetition"] for values in parsed if values["repetition"] is not None]
         if repetitions and len(repetitions) != len(parsed):
             reports.append(f"  {pattern}: only some clips have a repetition number")
             continue
-        repetition_width = compute_number_width(repetitions) if repetitions else 0
+        repetition_width = compute_number_width(repetitions, minimum_widths.get("repetition", 2)) if repetitions else 0
         named = []
         for clip, values in zip(clips, parsed):
             signer, sentence = int(values["signer"]), int(values["sentence"])

@@ -9,6 +9,14 @@
 #   not detected is all zeros. The file is named <clip_id>.npy (not pose.npy) so the existing
 #   RaabtaAI Isharah reader (which looks for NN_NNNN.npy) reads Isharah output unchanged.
 
+naming:
+  # Minimum digits per number in the clip identifiers, per dataset. Isharah's identifiers are fixed
+  # as NN_NNNN (the original pose files and the RaabtaAI reader use them), so a run over only some
+  # signers must not shorten them. PSL and ArSL keep the padding their sources use (at least 2).
+  isharah: {signer: 2, sentence: 4}
+  psl: {signer: 2, sentence: 2}
+  arsl: {signer: 2, sentence: 2}
+
 holistic:
   # Primary settings: the first pass for every clip.
   primary:
@@ -72,6 +80,11 @@ quality:
     reference_any_hand_must_not_drop: true
     minimum_overall_any_hand_gain_in_points: 5.0   # whole dataset, reported only (blocks no signer)
     maximum_median_wrist_offset_from_reference_in_shoulder_widths: 0.10
+    maximum_unwritten_clip_percent: 1.0   # a signer may lose at most 1% of clips to unreadable sources; those
+                                          # clips are listed in clip_reports.jsonl and absent from the output
+    minimum_clips_with_reference_percent: 99.0   # a signer's clips that have an original pose file (missing = reference not attached)
+    minimum_frame_count_match_with_reference_percent: 99.0   # a clip whose frame count differs from its
+                                                              # reference is a wrong clip-to-folder mapping
 
 review:
   clips_per_signer: 4          # side-by-side images (reference or raw frame | new extraction), for optional spot checks

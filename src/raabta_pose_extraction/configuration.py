@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 REQUIRED_KEYS = {
+    "naming": {"isharah", "psl", "arsl"},
     "holistic": {"primary", "enhanced"},
     "hand_recovery": {"enabled", "detector", "calibration_clips_per_signer", "neighbour_window_in_frames"},
     "quality": {"clip_retry", "pose_outlier", "dataset_gates"},

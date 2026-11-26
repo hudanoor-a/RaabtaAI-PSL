@@ -18,7 +18,9 @@ RETRY = {"minimum_pose_frame_percent": 90.0, "minimum_any_hand_frame_percent": 6
 GATES = {"minimum_pose_frame_percent": 95.0, "maximum_pose_outlier_frame_percent": 1.0, "minimum_any_hand_frame_percent": 80.0,
          "minimum_face_frame_percent": 90.0, "face_covered_below_face_frame_percent": 20.0,
          "reference_any_hand_must_not_drop": True, "minimum_overall_any_hand_gain_in_points": 5.0,
-         "maximum_median_wrist_offset_from_reference_in_shoulder_widths": 0.10}
+         "maximum_median_wrist_offset_from_reference_in_shoulder_widths": 0.10,
+         "minimum_frame_count_match_with_reference_percent": 99.0, "minimum_clips_with_reference_percent": 99.0,
+         "maximum_unwritten_clip_percent": 1.0}
 
 
 def with_face(clip):
@@ -75,3 +77,25 @@ def test_one_failing_signer_does_not_fail_the_others():
                                    {"signer_folder_name": "signer01", "quality": measure_clip_quality(bad, None, OUTLIER_SETTINGS)}])
     gates = evaluate_dataset_gates(summary, GATES, has_reference=False)
     assert gates["signer_passed"] == {"signer00": True, "signer01": False} and not gates["passed"]
+
+
+def test_reference_gates_catch_a_missing_reference_and_a_wrong_mapping():
+    good = with_face(make_clip(40))
+    no_reference = aggregate_by_signer([{"signer_folder_name": "signer03", "quality": measure_clip_quality(good, None, OUTLIER_SETTINGS)}])
+    gates = evaluate_dataset_gates(no_reference, GATES, has_reference=True)
+    assert [g["gate"] for g in gates["results"] if not g["passed"]] == ["clips_with_reference_percent", "frame_count_match_with_reference_percent"]
+    shorter_reference = with_face(make_clip(35))     # another clip's poses: the frame count differs
+    summary = aggregate_by_signer([{"signer_folder_name": "signer03", "quality": measure_clip_quality(good, None, OUTLIER_SETTINGS),
+                                    "reference_comparison": compare_with_reference(good, shorter_reference, OUTLIER_SETTINGS)}])
+    assert summary["signer03"]["frame_count_match_with_reference_percent"] == 0.0
+    assert not evaluate_dataset_gates(summary, GATES, has_reference=True)["signer_passed"]["signer03"]
+
+
+def test_a_partly_attached_reference_fails_the_signer():
+    good = with_face(make_clip(40))
+    compared = {"signer_folder_name": "signer04", "quality": measure_clip_quality(good, None, OUTLIER_SETTINGS),
+                "reference_comparison": compare_with_reference(good, good, OUTLIER_SETTINGS)}
+    uncompared = {"signer_folder_name": "signer04", "quality": measure_clip_quality(good, None, OUTLIER_SETTINGS)}
+    gates = evaluate_dataset_gates(aggregate_by_signer([compared, uncompared]), GATES, has_reference=True)
+    assert [g["gate"] for g in gates["results"] if not g["passed"] and g["blocking"]] == ["clips_with_reference_percent"]
+    assert evaluate_dataset_gates(aggregate_by_signer([compared, compared]), GATES, has_reference=True)["signer_passed"]["signer04"]

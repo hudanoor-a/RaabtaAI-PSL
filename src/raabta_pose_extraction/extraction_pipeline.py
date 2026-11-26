@@ -26,12 +26,13 @@ import random
 import re
 import shutil
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import numpy as np
 
-from raabta_pose_extraction.clip_discovery import NamedClip, name_clips, scan_dataset_folder
+from raabta_pose_extraction.clip_discovery import NamedClip, find_folder_signer_conflicts, name_clips, scan_dataset_folders
 from raabta_pose_extraction.missing_hand_recovery import (
     HandRecoverySettings,
     calibrate_recovery_settings,
@@ -52,6 +53,8 @@ LOGGER = logging.getLogger("raabta_pose_extraction")
 DATASET_NAMES = ("isharah", "arsl", "psl")
 SETTINGS_NAMES = ("primary", "enhanced")
 CLIP_IDENTIFIER_FILE_PATTERN = re.compile(r"^\d+_\d+(?:_\d+)?$")
+
+MAXIMUM_WORKER_POOLS_PER_PASS = 50   # a crashing clip costs about 1 + (workers) pools; 50 covers about 10 crashes
 
 _worker_hand_detectors: dict = {}
 
@@ -150,8 +153,10 @@ def index_reference_poses(reference_pose_folders: list[Path]) -> dict[str, Path]
 
 
 def run_extraction_pass(clips: list[NamedClip], settings_name: str, configuration: dict, work_folder: Path,
-                        review_clips: set[str], worker_processes: int) -> dict[str, dict]:
-    """Extract every clip not yet finished in the work folder; returns metadata per clip (finished or failed)."""
+                        review_clips: set[str], worker_processes: int, worker_function=None) -> dict[str, dict]:
+    """Extract every clip not yet finished in the work folder; returns metadata per clip (finished or failed).
+    worker_function replaces extract_clip_in_worker in tests only."""
+    worker_function = worker_function or extract_clip_in_worker
     pass_folder = work_folder / settings_name
     tasks, results = [], {}
     for clip in clips:
@@ -169,22 +174,89 @@ def run_extraction_pass(clips: list[NamedClip], settings_name: str, configuratio
                 len(clips) - len(tasks), len(tasks), worker_processes)
     if not tasks:
         return results
-    started = time.time()
     timeout = configuration["runtime"]["clip_timeout_in_seconds"]
-    with ProcessPoolExecutor(worker_processes, mp_context=multiprocessing.get_context("spawn")) as executor:
-        futures = {executor.submit(extract_clip_in_worker, task): task["clip_identifier"] for task in tasks}
-        for done, future in enumerate(as_completed(futures), start=1):
+    started, cached = time.time(), len(results)   # cached: clips finished in an earlier run of this work folder
+    suspects: list[str] = []        # clips running when a pool broke: each is re-run alone to find the culprit
+    started_folder = work_folder / "started_clips"
+    pools = 0
+    while True:
+        pending = [task for task in tasks if task["clip_identifier"] not in results]
+        if not pending:
+            break
+        pools += 1
+        if pools > MAXIMUM_WORKER_POOLS_PER_PASS:
+            LOGGER.error("%s pass: %d worker pools used; %d clips left unextracted.", settings_name, pools - 1, len(pending))
+            break
+        isolating = [task for task in pending if task["clip_identifier"] in suspects][:1]
+        batch, workers = (isolating, 1) if isolating else (pending, worker_processes)
+        if pools > 1:
+            LOGGER.warning("%s pass: worker pool %d for %d clips%s.", settings_name, pools, len(batch),
+                           f" (re-running {isolating[0]['clip_identifier']} alone)" if isolating else "")
+        shutil.rmtree(started_folder, ignore_errors=True)
+        broken, timed_out = run_worker_pool(batch, workers, worker_function, timeout, results, settings_name,
+                                            (started, cached, len(tasks)))
+        unfinished_started = sorted(path.name for path in started_folder.glob("*")
+                                    if path.name in {task["clip_identifier"] for task in batch} and path.name not in results)
+        for clip in unfinished_started if timed_out else []:
+            results[clip] = {"clip_identifier": clip, "error": f"timed out: no clip finished for {timeout} s"}
+        if broken and isolating and not timed_out:
+            clip = isolating[0]["clip_identifier"]   # it ran alone, so it is the clip that killed the worker
+            results[clip] = {"clip_identifier": clip, "error": "killed its worker process (system out of memory or a crash in MediaPipe)"}
+            LOGGER.error("%s (%s) killed its worker process when run alone; recorded as failed.", clip, settings_name)
+        elif broken:
+            suspects.extend(clip for clip in unfinished_started if clip not in suspects)
+        if isolating:
+            suspects.remove(isolating[0]["clip_identifier"])
+    shutil.rmtree(started_folder, ignore_errors=True)
+    for task in tasks:
+        results.setdefault(task["clip_identifier"], {"clip_identifier": task["clip_identifier"],
+                                                     "error": "not extracted: too many worker crashes in this pass"})
+    return results
+
+
+def run_clip_task(worker_function, task: dict) -> dict:
+    """Runs in the worker: marks the clip as started (to tell which clips a broken pool was running), then extracts it."""
+    marker = Path(task["work_folder"]) / "started_clips" / task["clip_identifier"]
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    return worker_function(task)
+
+
+def run_worker_pool(batch: list[dict], workers: int, worker_function, timeout: float, results: dict,
+                    settings_name: str, progress: tuple[float, int, int]) -> tuple[bool, bool]:
+    """One process pool over the batch; fills results. Returns (pool broke, no clip finished within timeout).
+    progress = (pass start time, results before this pass, clips to extract in this pass), for the progress log."""
+    pass_started, results_before_pass, total = progress
+    executor = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"))
+    futures = {executor.submit(run_clip_task, worker_function, task): task["clip_identifier"] for task in batch}
+    waiting, broken, timed_out = set(futures), False, False
+    while waiting and not broken:
+        finished, waiting = wait(waiting, timeout=timeout, return_when=FIRST_COMPLETED)
+        if not finished:
+            LOGGER.error("%s pass: no clip finished for %d s; stopping this worker pool.", settings_name, timeout)
+            broken = timed_out = True
+            break
+        for future in finished:
             clip = futures[future]
             try:
-                results[clip] = future.result(timeout=timeout)
+                results[clip] = future.result()
+            except BrokenProcessPool:
+                broken = True
+                continue
             except Exception as error:   # noqa: BLE001 - one broken clip must not stop the run
                 results[clip] = {"clip_identifier": clip, "error": repr(error)}
                 LOGGER.error("%s (%s) failed: %r", clip, settings_name, error)
-            if done % 25 == 0 or done == len(tasks):
-                elapsed = time.time() - started
-                LOGGER.info("%s pass: %d/%d clips, %.0f s elapsed, about %.0f s left.", settings_name, done, len(tasks),
-                            elapsed, elapsed / done * (len(tasks) - done))
-    return results
+            done = len(results) - results_before_pass
+            if done % 25 == 0 or done == total:
+                elapsed = time.time() - pass_started
+                LOGGER.info("%s pass: %d/%d clips, %.0f s elapsed, about %.0f s left.", settings_name, done, total,
+                            elapsed, elapsed / max(done, 1) * (total - done))
+    if broken:
+        LOGGER.error("%s pass: worker pool stopped (a worker died or hung).", settings_name)
+        for process in list((getattr(executor, "_processes", None) or {}).values()):   # stuck or orphaned workers
+            process.terminate()
+    executor.shutdown(wait=not broken, cancel_futures=True)
+    return broken, timed_out
 
 
 def load_extraction(work_folder: Path, settings_name: str, clip_identifier: str) -> tuple[np.ndarray, dict]:
@@ -208,7 +280,9 @@ def calibrate_or_load(clips: list[NamedClip], work_folder: Path, configuration: 
                       seed: int) -> HandRecoverySettings | None:
     if not configuration["hand_recovery"]["enabled"]:
         return None
-    if calibration_file is not None and Path(calibration_file).exists():
+    if calibration_file is not None:
+        if not Path(calibration_file).is_file():
+            raise FileNotFoundError(f"Calibration file {calibration_file} does not exist (check CALIBRATION_FILE).")
         LOGGER.info("Using the given hand-recovery calibration %s.", calibration_file)
         return HandRecoverySettings.from_dictionary(json.loads(Path(calibration_file).read_text(encoding="utf-8")))
     per_signer = configuration["hand_recovery"]["calibration_clips_per_signer"]
@@ -232,7 +306,7 @@ def calibrate_or_load(clips: list[NamedClip], work_folder: Path, configuration: 
 
 # ---- the run -------------------------------------------------------------------------------------
 
-def run_dataset_extraction(dataset_name: str, input_folder: Path, output_root: Path, work_folder: Path, configuration: dict,
+def run_dataset_extraction(dataset_name: str, input_folders: list[Path], output_root: Path, work_folder: Path, configuration: dict,
                            clip_name_pattern: str | None = None, signers: list[int] | None = None,
                            clips_per_signer: int | None = None, reference_pose_folders: list[Path] | None = None,
                            calibration_file: Path | None = None, worker_processes: int | None = None) -> dict:
@@ -241,7 +315,15 @@ def run_dataset_extraction(dataset_name: str, input_folder: Path, output_root: P
     seed = configuration["runtime"]["seed"]
     workers = worker_processes or configuration["runtime"]["worker_processes"]
     work_folder, output_root = Path(work_folder), Path(output_root)
-    named, pattern = name_clips(scan_dataset_folder(Path(input_folder)), clip_name_pattern)
+    named, pattern = name_clips(scan_dataset_folders([Path(folder) for folder in input_folders]), clip_name_pattern,
+                                configuration["naming"][dataset_name])
+    signer_conflicts = find_folder_signer_conflicts(named)
+    for conflict in signer_conflicts:
+        LOGGER.warning("Signer number conflict: %s", conflict)
+    if signers:
+        missing = sorted(set(signers) - {clip.signer_number for clip in named})
+        if missing:
+            raise RuntimeError(f"Selected signers {missing} have no clips in the input folders.")
     clips = select_clips(named, signers, clips_per_signer, seed)
     if not clips:
         raise RuntimeError("No clips selected.")
@@ -326,12 +408,14 @@ def run_dataset_extraction(dataset_name: str, input_folder: Path, output_root: P
     written = [report for report in reports if report["status"] == "written"]
     signer_summary = aggregate_by_signer(written)
     gates = evaluate_dataset_gates(signer_summary, configuration["quality"]["dataset_gates"], bool(reference_index))
-    signer_outcomes = decide_signer_outcomes(clips, reports, gates)
+    signer_outcomes = decide_signer_outcomes(clips, reports, gates,
+                                             configuration["quality"]["dataset_gates"]["maximum_unwritten_clip_percent"])
     passed_signers = sorted(signer for signer, outcome in signer_outcomes.items() if outcome["passed"])
     failed_signers = sorted(signer for signer, outcome in signer_outcomes.items() if not outcome["passed"])
     from raabta_pose_extraction.mediapipe_models import describe_mediapipe_version
     summary = {
-        "dataset_name": dataset_name, "input_folder": str(input_folder), "clip_name_pattern": pattern,
+        "dataset_name": dataset_name, "input_folders": [str(folder) for folder in input_folders], "clip_name_pattern": pattern,
+        "folder_signer_conflicts": signer_conflicts,
         "clips_selected": len(clips), "clips_written": len(written),
         "clips_re_extracted_with_enhanced_settings": len(retry_clips),
         "clips_kept_from_enhanced_settings": sum(1 for report in written if report["settings_used"] == "enhanced"),
@@ -344,10 +428,12 @@ def run_dataset_extraction(dataset_name: str, input_folder: Path, output_root: P
     }
     # Passing signers go to <dataset>/, failing signers to <dataset>_FAILED_VALIDATION/: the publishable
     # folder holds only signers that passed every gate, so a missing signer folder means that signer failed.
+    # Only this run's signers are replaced, so several runs (signer groups) can share one output root.
     passed_folder, failed_folder = output_root / dataset_name, output_root / f"{dataset_name}_FAILED_VALIDATION"
-    for folder in (passed_folder, failed_folder):
-        if folder.exists():
-            shutil.rmtree(folder)
+    for signer in signer_outcomes:
+        for folder in (passed_folder, failed_folder):
+            if (folder / signer).exists():
+                shutil.rmtree(folder / signer)
     for signer, outcome in signer_outcomes.items():
         source = staging / dataset_name / signer
         target = (passed_folder if outcome["passed"] else failed_folder) / signer
@@ -358,14 +444,23 @@ def run_dataset_extraction(dataset_name: str, input_folder: Path, output_root: P
             target.mkdir(parents=True)
         if not outcome["passed"]:
             (target / "signer_failure.json").write_text(json.dumps(outcome, indent=1), encoding="utf-8")
-    shutil.rmtree(staging)
+    shutil.rmtree(staging, ignore_errors=True)   # absent when no clip of this run could be written
+    run_name = "signers_" + "_".join(sorted(signer.removeprefix("signer") for signer in signer_outcomes))
     for folder in (passed_folder, failed_folder):
         if not folder.exists():
             continue
-        (folder / "extraction_summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
-        (folder / "signer_outcomes.json").write_text(json.dumps({"passed_signers": passed_signers, "failed_signers": failed_signers,
-                                                                 "signer_outcomes": signer_outcomes}, indent=1), encoding="utf-8")
-        with (folder / "clip_reports.jsonl").open("w", encoding="utf-8") as handle:
+        (folder / "extraction_summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")   # latest run
+        (folder / "run_summaries").mkdir(exist_ok=True)
+        (folder / "run_summaries" / f"{run_name}.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+        merged = {}
+        outcomes_file = folder / "signer_outcomes.json"
+        if outcomes_file.exists():
+            merged = json.loads(outcomes_file.read_text(encoding="utf-8")).get("signer_outcomes", {})
+        merged.update(signer_outcomes)
+        outcomes_file.write_text(json.dumps({"passed_signers": sorted(s for s, o in merged.items() if o["passed"]),
+                                             "failed_signers": sorted(s for s, o in merged.items() if not o["passed"]),
+                                             "signer_outcomes": merged}, indent=1), encoding="utf-8")
+        with (folder / "clip_reports.jsonl").open("a", encoding="utf-8") as handle:
             for report in reports:
                 handle.write(json.dumps(report) + "\n")
         if recovery is not None:
@@ -377,8 +472,9 @@ def run_dataset_extraction(dataset_name: str, input_folder: Path, output_root: P
     return summary
 
 
-def decide_signer_outcomes(clips: list[NamedClip], reports: list[dict], gates: dict) -> dict:
-    """Per signer: passed only if every one of its clips was written and every one of its gates passed."""
+def decide_signer_outcomes(clips: list[NamedClip], reports: list[dict], gates: dict, maximum_unwritten_clip_percent: float) -> dict:
+    """Per signer: passed only if every gate passed and at most maximum_unwritten_clip_percent of its clips
+    could not be extracted (those clips are listed; they are simply absent from the output)."""
     outcomes = {}
     for signer in sorted({clip.signer_folder_name for clip in clips}):
         signer_reports = [report for report in reports if report["signer_folder_name"] == signer]
@@ -386,7 +482,9 @@ def decide_signer_outcomes(clips: list[NamedClip], reports: list[dict], gates: d
                       "integrity_problems": report.get("integrity_problems")}
                      for report in signer_reports if report["status"] != "written"]
         failed_gates = [result for result in gates["results"] if result["group"] == signer and not result["passed"]]
-        outcomes[signer] = {"passed": gates["signer_passed"].get(signer, False) and not unwritten,
+        unwritten_percent = round(100 * len(unwritten) / max(len(signer_reports), 1), 2)
+        outcomes[signer] = {"passed": gates["signer_passed"].get(signer, False) and unwritten_percent <= maximum_unwritten_clip_percent,
+                            "unwritten_clip_percent": unwritten_percent,
                             "clips": len(signer_reports), "clips_not_written": unwritten, "failed_gates": failed_gates}
     return outcomes
 

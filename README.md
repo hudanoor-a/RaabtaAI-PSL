@@ -22,7 +22,8 @@ Run it with `notebooks/pose_extraction.ipynb` on Kaggle (CPU, Internet on, Save 
 ```
 
 - **Row layout:** pose 33 × (x, y, z, visibility), left hand 21 × 3, right hand 21 × 3, face 468 × 3. A part not detected is all zeros. This is the layout of the original Isharah files, so the RaabtaAI data pipeline reads it unchanged.
-- **Naming:** numbers keep the padding the source uses, at least 2 digits. Isharah becomes `signer00/00_0001`; PSL sentence 7 of signer 3 becomes `signer03/03_07`; a repetition gives `03_07_01`.
+- **Input:** one or more input folders per dataset (`--input-folder` repeated; on Kaggle Isharah is split into one dataset per signer, `signerNN-isharah1000`). Each clip's name starts with its input folder's name, so the signer number can come from the folder name (`signer02-isharah1000/0001`) or from the path inside it. `discover` warns when the two disagree; with a reference, the frame-count gate then fails that signer.
+- **Naming:** numbers keep the padding the source uses, with a minimum per dataset (`naming` in the config). Isharah is always `signer00/00_0001` (2 + 4 digits, like the original pose files), even when only some signers run; PSL sentence 7 of signer 3 becomes `signer03/03_07`; a repetition gives `03_07_01`.
 - **Pose file name:** each clip's pose file is named after the clip (`00_0001.npy`), not `pose.npy`. RaabtaAI's Isharah reader finds clips by that name, so Isharah output works there with only a new folder glob.
 - **Pass or fail per signer:** `<output_root>/<dataset>/` holds only signers whose clips were all extracted and whose gates all pass, so it can be published as it is. A signer missing there failed; its folder and `signer_failure.json` are in `<dataset>_FAILED_VALIDATION/`. The extraction exits with code 0 only when every signer passed.
 
@@ -56,8 +57,10 @@ Run it with `notebooks/pose_extraction.ipynb` on Kaggle (CPU, Internet on, Save 
 | pose outlier frames | ≤ 1% |
 | face frames | ≥ 90%; skipped (and reported) for signers whose face is found in fewer than 20% of frames, for example niqabi signers |
 | any-hand frames, without a reference | ≥ 80% |
-| with a reference extraction (Isharah originals) | pose and any-hand coverage not below the reference; median wrist offset from the reference ≤ 0.10 shoulder widths. The overall any-hand gain (target ≥ 5 points) is reported for the whole dataset but blocks no signer |
-| all clips written | every clip of the signer extracted without error |
+| with a reference extraction (Isharah originals) | ≥ 99% of the signer's clips have an original pose file (a reference dataset not attached fails loudly); frame count equal to the original for ≥ 99% of those clips (catches a clip matched to the wrong frames); pose and any-hand coverage not below the original; median wrist offset from the original ≤ 0.10 shoulder widths. The overall any-hand gain (target ≥ 5 points) is reported but blocks no signer |
+| clips written | at most 1% of the signer's clips not extracted (unreadable source, crash, timeout); those clips are listed in `signer_failure.json` / `clip_reports.jsonl` and absent from the output |
+
+**Robustness.** Clips run in 4 worker processes. A clip that raises an error is recorded and the run goes on. A worker killed by the system breaks the pool: the clips it was running are re-run one at a time to find the one that caused it, which is recorded as failed, and every other clip continues. A worker that hangs is stopped after `clip_timeout_in_seconds` (3600) without any clip finishing.
 
 The side-by-side images `pose<FFFF>.jpg` are kept in a sample of clip folders for optional spot checks; nothing waits for a person.
 
@@ -66,7 +69,7 @@ The side-by-side images `pose<FFFF>.jpg` are kept in a sample of clip folders fo
 The notebook's pilot step measures the real speed and projects the full run. As a guide, complexity 1 took about 140 ms per frame per worker on 512 × 512 frames here; complexity 2 is slower.
 
 - **PSL** (about 750 videos) fits one session.
-- **Isharah** (3.5 million frames) needs several sessions. Split it with `SIGNERS`, and reuse the first session's `hand_recovery_calibration.json` through `CALIBRATION_FILE`, so every shard uses the same thresholds. `/kaggle/working` holds at most 20 GB, and Isharah poses are about 23 GB in total, so plan at most about 9 signers per session.
+- **Isharah** (3.5 million frames) needs several sessions. Split it with `SIGNERS` (a group per session, e.g. `[0, 1]`). From the second session on, attach the first session's output and set `CALIBRATION_FILE` to its `hand_recovery_calibration.json`, so every group uses the same hand-recovery thresholds. Several groups can also share one output root: a run replaces only its own signer folders, merges `signer_outcomes.json`, and keeps one summary per group in `run_summaries/`. `/kaggle/working` holds at most 20 GB, and Isharah poses are about 23 GB in total, so plan at most about 9 signers per session (time, not disk, is the real limit).
 
 ## Using the output in RaabtaAI
 

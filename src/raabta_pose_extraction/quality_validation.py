@@ -145,6 +145,9 @@ def aggregate_by_signer(clip_reports: list[dict]) -> dict:
             for key in ("reference_pose_frames", "reference_any_hand_frames", "reference_face_frames"):
                 if key in comparison:
                     totals[group][key] += comparison[key]
+            if comparison:
+                totals[group]["reference_clips"] += 1
+                totals[group]["reference_frame_count_matches"] += int(comparison.get("frame_count_matches_reference", False))
             if comparison.get("median_wrist_offset_from_reference_in_shoulder_widths") is not None:
                 offsets[group].append(comparison["median_wrist_offset_from_reference_in_shoulder_widths"])
             totals[group]["clips"] += 1
@@ -161,6 +164,10 @@ def aggregate_by_signer(clip_reports: list[dict]) -> dict:
             "pose_outlier_frame_percent": round(100 * values["pose_outlier_frames"] / max(pose, 1), 2),
             "recovered_hands": int(values["recovered_hands"]),
         }
+        if values.get("reference_clips"):
+            entry["reference_clips"] = int(values["reference_clips"])
+            entry["frame_count_match_with_reference_percent"] = round(100 * values["reference_frame_count_matches"]
+                                                                      / values["reference_clips"], 2)
         if values.get("reference_pose_frames"):
             reference_pose = values["reference_pose_frames"]
             entry["reference_pose_frame_percent"] = round(100 * reference_pose / frames, 2)
@@ -198,6 +205,15 @@ def evaluate_dataset_gates(signer_summary: dict, gates: dict, has_reference: boo
         else:
             record("face_frame_percent", group, entry["face_frame_percent"], f">= {gates['minimum_face_frame_percent']}",
                    entry["face_frame_percent"] >= gates["minimum_face_frame_percent"])
+        if has_reference:
+            # Every clip must be compared with its original: a missing (or partly attached) reference dataset
+            # would otherwise let a signer pass on the few clips that happen to have one.
+            covered = round(100 * entry.get("reference_clips", 0) / max(entry["clips"], 1), 2)
+            limit = gates["minimum_clips_with_reference_percent"]
+            record("clips_with_reference_percent", group, covered, f">= {limit}", covered >= limit)
+            matched = entry.get("frame_count_match_with_reference_percent", 0.0)
+            limit = gates["minimum_frame_count_match_with_reference_percent"]
+            record("frame_count_match_with_reference_percent", group, matched, f">= {limit}", matched >= limit)
         if has_reference and "reference_any_hand_frame_percent" in entry:
             if gates["reference_any_hand_must_not_drop"]:
                 record("any_hand_not_below_reference", group, entry["any_hand_frame_percent"],
